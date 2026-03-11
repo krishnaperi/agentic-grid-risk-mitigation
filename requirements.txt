@@ -10,3 +10,5 @@ python-dotenv>=1.0.1
 google-genai>=0.7.0
 fastapi
 uvicorn
+snowflake-connector-python
+cryptography
