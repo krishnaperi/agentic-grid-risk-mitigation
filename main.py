@@ -1,7 +1,7 @@
 import os
 from typing import TypedDict, Dict, Any
 from langgraph.graph import StateGraph, END
-from config import get_snowflake_connection
+from config import get_snowflake_connection, get_groq_client
 
 # 1. Define the state schema
 class AgentState(TypedDict):
@@ -21,16 +21,10 @@ def searcher_node(state: AgentState) -> Dict[str, Any]:
     """
     print("---[SEARCHER AGENT]--- Searching for Grid Alerts...")
     
-    # In a full implementation, integrate Tavily:
-    # from langchain_community.tools.tavily_search import TavilySearchResults
-    # search = TavilySearchResults(max_results=2)
-    # results = search.invoke("ERCOT Level 1 Emergency infrastructure failures")
-    
     # Mocking search results for scaffolding
     mock_search_results = "Warning: High temperatures predicted in Texas. Grid operating near peak capacity."
     
     return {"search_context": mock_search_results}
-
 
 def analyst_node(state: AgentState) -> Dict[str, Any]:
     """
@@ -40,30 +34,36 @@ def analyst_node(state: AgentState) -> Dict[str, Any]:
     print("---[ANALYST AGENT]--- Querying Snowflake and computing GSI...")
     
     # Query Snowflake using config.py
-    conn = get_snowflake_connection()
-    cursor = conn.cursor()
-    
-    temp = 80.0
     try:
-        cursor.execute("SELECT MAX_TEMPERATURE_AIR_2M_F FROM GLOBAL_WEATHER__CLIMATE_DATA_BY_PELMOREX_WEATHER_SOURCE.PWS_BI_SAMPLE.POINT_FORECAST_DAY WHERE MAX_TEMPERATURE_AIR_2M_F IS NOT NULL LIMIT 1")
-        res = cursor.fetchone()
-        if res:
-            temp = float(res[0])
-    except Exception as e:
-        print(f"Warning: Weather query failed: {e}")
-
-    load_forecast = 15000.0
-    try:
-        cursor.execute("SELECT DALOAD FROM YES_ENERGY__SAMPLE_DATA.YES_ENERGY_SAMPLE.DART_LOADS_SAMPLE WHERE DALOAD IS NOT NULL LIMIT 1")
-        res = cursor.fetchone()
-        if res:
-            load_forecast = float(res[0])
-    except Exception as e:
-        print(f"Warning: Load query failed: {e}")
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
         
-    cursor.close()
-    conn.close()
-    
+        temp = 80.0
+        try:
+            # Note: Using the database and schema from environment via config.py
+            cursor.execute("SELECT MAX_TEMPERATURE_AIR_2M_F FROM PWS_BI_SAMPLE.POINT_FORECAST_DAY WHERE MAX_TEMPERATURE_AIR_2M_F IS NOT NULL LIMIT 1")
+            res = cursor.fetchone()
+            if res:
+                temp = float(res[0])
+        except Exception as e:
+            print(f"Warning: Weather query failed: {e}")
+
+        load_forecast = 15000.0
+        try:
+            cursor.execute("SELECT DALOAD FROM YES_ENERGY_SAMPLE.DART_LOADS_SAMPLE WHERE DALOAD IS NOT NULL LIMIT 1")
+            res = cursor.fetchone()
+            if res:
+                load_forecast = float(res[0])
+        except Exception as e:
+            print(f"Warning: Load query failed: {e}")
+            
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"Error in Analyst Node (Snowflake): {e}")
+        temp = 80.0
+        load_forecast = 15000.0
+
     # Max capacity varies by grid (ERCOT peak is ~80k-85k MW). We use 85000.0 as scaffold/mock max capacity.
     max_capacity = 85000.0
     
@@ -85,11 +85,10 @@ def analyst_node(state: AgentState) -> Dict[str, Any]:
 
 
 import json
-import google.generativeai as genai
 
 def strategist_node(state: AgentState) -> Dict[str, Any]:
     """
-    Strategist Agent Task: Synthesize Searcher and Analyst data. Outputs Grid Mitigation Protocol if GSI > 0.85
+    Strategist Agent Task: Synthesize Searcher and Analyst data. Outputs Grid Mitigation Protocol.
     Tool: LLM (Llama 3 via Groq).
     """
     print("---[STRATEGIST AGENT]--- Formulating Mitigation Protocol...")
@@ -99,46 +98,54 @@ def strategist_node(state: AgentState) -> Dict[str, Any]:
     
     protocol = {}
     
-    if gsi > 0.85:
-        print("    -> CRITICAL: GSI exceeds 0.85 threshold. Initiating Protocol via Gemini LLM.")
+    # We trigger the LLM to get a structured protocol regardless of GSI, 
+    # but the content will reflect the risk level.
+    print(f"    -> Initiating Protocol formulation via Groq (Llama 3). GSI: {gsi:.4f}")
+    
+    try:
+        client = get_groq_client()
+        prompt = f"The Grid Stress Index (GSI) is {gsi:.4f}. Context: '{search_context}'. Generate a short structured JSON 'Grid Mitigation Protocol'. Include 'status' (SAFE, WARNING, or CRITICAL), 'actions' (list of strings), 'urgency' (Low, Medium, High), and 'reason'."
         
-        try:
-            # Fallback to the provided key if not in env
-            api_key = os.getenv("GEMINI_API_KEY", "AIzaSyChJ9DjttX9NHv1OcV9k2DH4GIZ2sBgVWk")
-            genai.configure(api_key=api_key)
-            prompt = f"The Grid Stress Index (GSI) is {gsi:.4f}, strictly exceeding the critical 0.85 threshold. Context: '{search_context}'. Generate a short structured JSON 'Grid Mitigation Protocol' suggesting actions like Load Shedding, Battery Discharge, etc. Include 'status', 'actions' (list of strings), 'urgency', and 'reason'."
-            
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(
-                f"You are an expert Power Grid Strategist AI. Always output pure valid {""}JSON.\n\n{prompt}",
-                generation_config={"response_mime_type": "application/json"}
-            )
-            
-            content = response.text
-            if content:
-                protocol = json.loads(content)
-            else:
-                raise ValueError("Empty response from Gemini")
-            protocol['search_context_used'] = search_context
-            
-        except Exception as e:
-            print(f"Error calling Gemini API: {e}")
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert Power Grid Strategist AI. Always output pure valid JSON."
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            model="llama3-8b-8192",
+            response_format={"type": "json_object"}
+        )
+        
+        content = chat_completion.choices[0].message.content
+        if content:
+            protocol = json.loads(content)
+        else:
+            raise ValueError("Empty response from Groq")
+        protocol['search_context_used'] = search_context
+        
+    except Exception as e:
+        print(f"Error calling Groq API: {e}")
+        # Failsafe logic based on GSI
+        if gsi > 0.85:
             protocol = {
                 "status": "CRITICAL",
-                "action": ["Load Shedding", "Activate Battery Discharge"],
+                "actions": ["Load Shedding", "Activate Battery Discharge"],
                 "urgency": "High",
-                "reason": f"GSI level at {gsi:.4f} exceeds strict threshold 0.85. (Failsafe protocol generated due to LLM error)",
-                "search_context_used": search_context
+                "reason": f"GSI level at {gsi:.4f} exceeds strict threshold 0.85. (Failsafe protocol)",
             }
-    else:
-        print("    -> SAFE: GSI is within safe limits. No immediate action required.")
-        protocol = {
-            "status": "SAFE",
-            "action": ["Monitor"],
-            "urgency": "Low",
-            "reason": f"GSI is {gsi:.4f}.",
-            "search_context_used": search_context
-        }
+        else:
+            protocol = {
+                "status": "SAFE",
+                "actions": ["Monitor"],
+                "urgency": "Low",
+                "reason": f"GSI is {gsi:.4f}. (Failsafe protocol)",
+            }
+        protocol['search_context_used'] = search_context
         
     return {"mitigation_protocol": protocol}
 

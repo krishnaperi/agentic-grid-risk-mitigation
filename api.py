@@ -3,9 +3,7 @@ import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.backends import default_backend
-import snowflake.connector
+from main import app as agent_app
 
 app = FastAPI()
 
@@ -20,60 +18,45 @@ app.add_middleware(
 class GridRequest(BaseModel):
     region: str
 
-def get_snowflake_connection():
-    # Load and format the private key from Railway variables
-    raw_key = os.getenv('SNOWFLAKE_PRIVATE_KEY')
-    if not raw_key:
-        raise Exception("SNOWFLAKE_PRIVATE_KEY variable is missing!")
-    
-    # Fix potential newline issues from environment variables
-    formatted_key = raw_key.replace("\\n", "\n")
-    
-    p_key = serialization.load_pem_private_key(
-        formatted_key.encode(),
-        password=os.getenv('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE').encode(),
-        backend=default_backend()
-    )
-    
-    pkb = p_key.private_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
-
-    return snowflake.connector.connect(
-        account=os.getenv('SNOWFLAKE_ACCOUNT'),
-        user=os.getenv('SNOWFLAKE_USER'),
-        private_key=pkb,
-        warehouse=os.getenv('SNOWFLAKE_WAREHOUSE'),
-        database=os.getenv('SNOWFLAKE_DATABASE'),
-        schema=os.getenv('SNOWFLAKE_SCHEMA')
-    )
-
 @app.post("/analyze-grid")
 async def analyze(request: GridRequest):
     try:
-        ctx = get_snowflake_connection()
-        cur = ctx.cursor()
+        print(f"--- ANALYZING REGION: {request.region} ---")
         
-        # Using parameterized query to prevent SQL injection
-        query = "SELECT * FROM LOAD_ACTUALS_AND_FORECASTS WHERE region = %s LIMIT 5"
-        cur.execute(query, (request.region.upper(),))
-        data = cur.fetchall()
+        # Initialize state with default values
+        initial_state = {
+            "temp_forecast": 0.0,
+            "load_forecast": 0.0,
+            "max_capacity": 0.0,
+            "gsi": 0.0,
+            "search_context": "",
+            "mitigation_protocol": {}
+        }
         
-        ctx.close()
+        # Execute the LangGraph workflow
+        final_state = agent_app.invoke(initial_state)
+        
+        protocol = final_state.get("mitigation_protocol", {})
+        
         return {
             "status": "success", 
             "region": request.region,
-            "data": data, 
-            "recommendation": "Maintain current load. System stable."
+            "temp": final_state.get("temp_forecast"),
+            "load": final_state.get("load_forecast"),
+            "gsi": final_state.get("gsi"),
+            "analysis": protocol
         }
     except Exception as e:
         # This prints the REAL error to your Railway logs so you can see it
-        print("--- DATABASE ERROR ---")
+        print("--- API ERROR ---")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health():
     return {"status": "online"}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
