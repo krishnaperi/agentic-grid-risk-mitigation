@@ -15,6 +15,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+async def root():
+    return {
+        "message": "Grid Risk Mitigation API is online",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
 class GridRequest(BaseModel):
     region: str
 
