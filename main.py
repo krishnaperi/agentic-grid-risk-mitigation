@@ -40,8 +40,8 @@ def analyst_node(state: AgentState) -> Dict[str, Any]:
         
         temp = 80.0
         try:
-            # Note: Using the database and schema from environment via config.py
-            cursor.execute("SELECT MAX_TEMPERATURE_AIR_2M_F FROM PWS_BI_SAMPLE.POINT_FORECAST_DAY WHERE MAX_TEMPERATURE_AIR_2M_F IS NOT NULL LIMIT 1")
+            # Note: Using full paths for robust querying across databases
+            cursor.execute("SELECT MAX_TEMPERATURE_AIR_2M_F FROM GLOBAL_WEATHER__CLIMATE_DATA_BY_PELMOREX_WEATHER_SOURCE.PWS_BI_SAMPLE.POINT_FORECAST_DAY WHERE MAX_TEMPERATURE_AIR_2M_F IS NOT NULL LIMIT 1")
             res = cursor.fetchone()
             if res:
                 temp = float(res[0])
@@ -50,7 +50,7 @@ def analyst_node(state: AgentState) -> Dict[str, Any]:
 
         load_forecast = 15000.0
         try:
-            cursor.execute("SELECT DALOAD FROM YES_ENERGY_SAMPLE.DART_LOADS_SAMPLE WHERE DALOAD IS NOT NULL LIMIT 1")
+            cursor.execute("SELECT DALOAD FROM YES_ENERGY__SAMPLE_DATA.YES_ENERGY_SAMPLE.DART_LOADS_SAMPLE WHERE DALOAD IS NOT NULL LIMIT 1")
             res = cursor.fetchone()
             if res:
                 load_forecast = float(res[0])
@@ -187,5 +187,4 @@ if __name__ == "__main__":
     final_state = app.invoke(initial_state)
     
     print("\n=== FINAL OUTPUT ===")
-    import json
     print(json.dumps(final_state.get("mitigation_protocol"), indent=2))
