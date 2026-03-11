@@ -1,0 +1,10 @@
+snowflake-connector-python>=3.11.0
+cryptography>=42.0.0
+langchain>=0.2.0
+langgraph>=0.1.0
+tavily-python>=0.3.0
+streamlit>=1.35.0
+pandas>=2.0.0
+pydantic>=2.7.0
+python-dotenv>=1.0.1
+google-generativeai>=0.7.0
